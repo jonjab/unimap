@@ -1,0 +1,37 @@
+[project]
+name = "unimap"
+version = "0.1.0"
+description = "Text recognition on historical map scans via IIIF"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "httpx>=0.27",
+    "paddleocr>=2.9,<3",
+    "paddlepaddle>=2.6,<3",
+    "setuptools",
+    "Pillow>=10.0",
+    "numpy>=1.26",
+    "shapely>=2.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-httpx>=0.30",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+unimap = "unimap.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/unimap"]
+
+[tool.ruff]
+line-length = 99
+target-version = "py311"

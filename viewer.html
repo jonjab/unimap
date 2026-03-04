@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>UniMap Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; }
+  header { padding: 1rem 2rem; background: #16213e; border-bottom: 1px solid #0f3460; }
+  header h1 { font-size: 1.4rem; font-weight: 600; }
+  header p { font-size: 0.85rem; color: #888; margin-top: 0.25rem; }
+  .controls { padding: 1rem 2rem; background: #16213e; border-bottom: 1px solid #0f3460;
+              display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
+  .controls select, .controls input { padding: 0.4rem 0.8rem; background: #1a1a2e;
+    color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; font-size: 0.9rem; }
+  .controls label { font-size: 0.85rem; color: #aaa; }
+  .controls input[type=range] { width: 120px; }
+  .viewer { position: relative; overflow: auto; height: calc(100vh - 140px); background: #111; }
+  .viewer img { display: block; }
+  .overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .overlay rect { pointer-events: all; cursor: pointer; }
+  .overlay rect:hover { stroke: #00ff88; stroke-width: 3; fill: rgba(0, 255, 136, 0.15); }
+  .tooltip { position: fixed; background: #16213e; border: 1px solid #0f3460; color: #e0e0e0;
+    padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; pointer-events: none;
+    z-index: 100; max-width: 300px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); display: none; }
+  .tooltip .text { font-weight: 600; color: #00ff88; }
+  .tooltip .conf { color: #888; font-size: 0.8rem; }
+  .stats { position: fixed; bottom: 1rem; right: 1rem; background: #16213e; border: 1px solid #0f3460;
+    padding: 0.75rem 1rem; border-radius: 6px; font-size: 0.8rem; color: #aaa; z-index: 50; }
+</style>
+</head>
+<body>
+<header>
+  <h1>UniMap — OCR Results Viewer</h1>
+  <p>Text detections overlaid on historical maps via IIIF</p>
+</header>
+<div class="controls">
+  <label>Map: <select id="mapSelect"></select></label>
+  <label>Min confidence: <input type="range" id="confSlider" min="0" max="100" value="50">
+    <span id="confValue">0.50</span></label>
+  <label>View width: <input type="range" id="widthSlider" min="800" max="4096" value="2048" step="256">
+    <span id="widthValue">2048</span>px</label>
+  <label><input type="checkbox" id="showBoxes" checked> Show boxes</label>
+</div>
+<div class="viewer" id="viewer">
+  <img id="mapImage">
+  <svg class="overlay" id="overlay"></svg>
+</div>
+<div class="tooltip" id="tooltip">
+  <div class="text"></div>
+  <div class="conf"></div>
+</div>
+<div class="stats" id="stats"></div>
+
+<script>
+const DATA_DIR = 'data';
+const geojsonFiles = [
+  'stanford--bb014tx0752',
+  'stanford--bb051ch9980',
+  'rumsey--RUMSEY_8_1_377486_90143668',
+  'rumsey--RUMSEY_8_1_377489_90143654'
+];
+
+let currentData = null;
+let currentRecord = null;
+
+const select = document.getElementById('mapSelect');
+const confSlider = document.getElementById('confSlider');
+const confValue = document.getElementById('confValue');
+const widthSlider = document.getElementById('widthSlider');
+const widthValue = document.getElementById('widthValue');
+const showBoxes = document.getElementById('showBoxes');
+const mapImage = document.getElementById('mapImage');
+const overlay = document.getElementById('overlay');
+const tooltip = document.getElementById('tooltip');
+const stats = document.getElementById('stats');
+
+geojsonFiles.forEach(f => {
+  const opt = document.createElement('option');
+  opt.value = f;
+  opt.textContent = f;
+  select.appendChild(opt);
+});
+
+async function loadMap(slug) {
+  const resp = await fetch(`${DATA_DIR}/geojson/${slug}.geojson`);
+  currentData = await resp.json();
+  currentRecord = currentData.properties;
+
+  select.querySelectorAll('option').forEach(opt => {
+    if (opt.value === slug) opt.textContent = `${currentRecord.map_title} (${currentRecord.map_source})`;
+  });
+
+  // Load the downloaded image
+  mapImage.src = `${DATA_DIR}/images/${currentRecord.map_source}/${slug}.jpg`;
+  mapImage.onload = () => renderOverlay();
+}
+
+function renderOverlay() {
+  if (!currentData || !mapImage.naturalWidth) return;
+
+  const viewWidth = parseInt(widthSlider.value);
+  const scale = viewWidth / currentRecord.canvas_width;
+  const viewHeight = currentRecord.canvas_height * scale;
+
+  mapImage.style.width = viewWidth + 'px';
+  mapImage.style.height = viewHeight + 'px';
+
+  overlay.setAttribute('width', viewWidth);
+  overlay.setAttribute('height', viewHeight);
+  overlay.style.width = viewWidth + 'px';
+  overlay.style.height = viewHeight + 'px';
+
+  const minConf = parseInt(confSlider.value) / 100;
+  const show = showBoxes.checked;
+
+  overlay.innerHTML = '';
+  let shown = 0;
+
+  if (show) {
+    currentData.features.forEach((feat, i) => {
+      const conf = feat.properties.confidence;
+      if (conf < minConf) return;
+
+      const coords = feat.geometry.coordinates[0];
+      const xs = coords.map(c => c[0]);
+      const ys = coords.map(c => c[1]);
+      const x = Math.min(...xs) * scale;
+      const y = Math.min(...ys) * scale;
+      const w = (Math.max(...xs) - Math.min(...xs)) * scale;
+      const h = (Math.max(...ys) - Math.min(...ys)) * scale;
+
+      // Color by confidence: green = high, yellow = medium, red = low
+      const hue = Math.round(conf * 120); // 0=red, 120=green
+      const color = `hsl(${hue}, 100%, 50%)`;
+
+      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      rect.setAttribute('x', x);
+      rect.setAttribute('y', y);
+      rect.setAttribute('width', w);
+      rect.setAttribute('height', h);
+      rect.setAttribute('fill', `hsla(${hue}, 100%, 50%, 0.08)`);
+      rect.setAttribute('stroke', color);
+      rect.setAttribute('stroke-width', '1.5');
+      rect.dataset.index = i;
+
+      rect.addEventListener('mouseenter', e => {
+        tooltip.style.display = 'block';
+        tooltip.querySelector('.text').textContent = `"${feat.properties.text}"`;
+        tooltip.querySelector('.conf').textContent = `Confidence: ${conf.toFixed(3)} | ${Math.round(Math.min(...xs))},${Math.round(Math.min(...ys))} ${Math.round(w/scale)}×${Math.round(h/scale)}px`;
+      });
+      rect.addEventListener('mousemove', e => {
+        tooltip.style.left = (e.clientX + 12) + 'px';
+        tooltip.style.top = (e.clientY + 12) + 'px';
+      });
+      rect.addEventListener('mouseleave', () => {
+        tooltip.style.display = 'none';
+      });
+
+      overlay.appendChild(rect);
+      shown++;
+    });
+  }
+
+  stats.textContent = `${shown} / ${currentData.features.length} detections shown (≥ ${minConf.toFixed(2)} confidence)`;
+}
+
+select.addEventListener('change', () => loadMap(select.value));
+confSlider.addEventListener('input', () => {
+  confValue.textContent = (parseInt(confSlider.value) / 100).toFixed(2);
+  renderOverlay();
+});
+widthSlider.addEventListener('input', () => {
+  widthValue.textContent = widthSlider.value;
+  renderOverlay();
+});
+showBoxes.addEventListener('change', renderOverlay);
+
+loadMap(geojsonFiles[0]);
+
+// Add zoom functionality using mouse wheel
+const viewerElement = document.getElementById('viewer');
+const ZOOM_SENSITIVITY = 0.001; // Controls how fast zoom is
+
+viewerElement.addEventListener('wheel', (event) => {
+  event.preventDefault(); // Prevent default page scrolling
+
+  const currentViewWidth = parseInt(widthSlider.value);
+  const zoomFactor = 1 - event.deltaY * ZOOM_SENSITIVITY; // Zoom in if deltaY is negative, zoom out if positive
+
+  // Calculate new viewWidth, clamping to min/max slider values
+  let newViewWidth = currentViewWidth * zoomFactor;
+  const minWidth = parseInt(widthSlider.min);
+  const maxWidth = parseInt(widthSlider.max);
+
+  // Ensure newViewWidth stays within bounds
+  if (newViewWidth < minWidth) {
+    newViewWidth = minWidth;
+  } else if (newViewWidth > maxWidth) {
+    newViewWidth = maxWidth;
+  }
+
+  // Update slider value and trigger renderOverlay
+  widthSlider.value = newViewWidth;
+  widthValue.textContent = newViewWidth;
+  renderOverlay();
+});
+
+</script>
+</body>
+</html>
