@@ -9,13 +9,22 @@
   header { padding: 1rem 2rem; background: #16213e; border-bottom: 1px solid #0f3460; }
   header h1 { font-size: 1.4rem; font-weight: 600; }
   header p { font-size: 0.85rem; color: #888; margin-top: 0.25rem; }
-  .controls { padding: 1rem 2rem; background: #16213e; border-bottom: 1px solid #0f3460;
+  .controls { padding: 0.75rem 2rem; background: #16213e; border-bottom: 1px solid #0f3460;
               display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; }
-  .controls select, .controls input { padding: 0.4rem 0.8rem; background: #1a1a2e;
+  .controls select, .controls input[type=url] { padding: 0.4rem 0.8rem; background: #1a1a2e;
     color: #e0e0e0; border: 1px solid #0f3460; border-radius: 4px; font-size: 0.9rem; }
-  .controls label { font-size: 0.85rem; color: #aaa; }
   .controls input[type=range] { width: 120px; }
-  .viewer { position: relative; overflow: auto; height: calc(100vh - 140px); background: #111; }
+  .controls label { font-size: 0.85rem; color: #aaa; }
+  .controls button { padding: 0.4rem 1rem; background: #0f3460; color: #e0e0e0;
+    border: 1px solid #0f3460; border-radius: 4px; font-size: 0.9rem; cursor: pointer; }
+  .controls button:hover { background: #1a5276; }
+  .controls button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .controls input[type=url] { width: 420px; }
+  .process-status { font-size: 0.85rem; color: #888; }
+  .viewer { position: relative; overflow: hidden; height: calc(100vh - 170px); background: #111;
+            cursor: grab; }
+  .viewer.panning { cursor: grabbing; }
+  .map-wrapper { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
   .viewer img { display: block; }
   .overlay { position: absolute; top: 0; left: 0; pointer-events: none; }
   .overlay rect { pointer-events: all; cursor: pointer; }
@@ -27,6 +36,13 @@
   .tooltip .conf { color: #888; font-size: 0.8rem; }
   .stats { position: fixed; bottom: 1rem; right: 1rem; background: #16213e; border: 1px solid #0f3460;
     padding: 0.75rem 1rem; border-radius: 6px; font-size: 0.8rem; color: #aaa; z-index: 50; }
+  .loading-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7); z-index: 200; display: none; align-items: center;
+    justify-content: center; flex-direction: column; color: #e0e0e0; font-size: 1.2rem; }
+  .loading-overlay.active { display: flex; }
+  .spinner { border: 4px solid #333; border-top: 4px solid #00ff88; border-radius: 50%;
+    width: 40px; height: 40px; animation: spin 1s linear infinite; margin-bottom: 1rem; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
@@ -38,23 +54,33 @@
   <label>Map: <select id="mapSelect"></select></label>
   <label>Min confidence: <input type="range" id="confSlider" min="0" max="100" value="50">
     <span id="confValue">0.50</span></label>
-  <label>View width: <input type="range" id="widthSlider" min="800" max="4096" value="2048" step="256">
-    <span id="widthValue">2048</span>px</label>
+  <label>Zoom: <span id="zoomValue">100</span>%</label>
   <label><input type="checkbox" id="showBoxes" checked> Show boxes</label>
 </div>
+<div class="controls">
+  <input type="url" id="manifestUrl" placeholder="Paste IIIF manifest URL...">
+  <button id="processBtn">Process</button>
+  <span class="process-status" id="processStatus"></span>
+</div>
 <div class="viewer" id="viewer">
-  <img id="mapImage">
-  <svg class="overlay" id="overlay"></svg>
+  <div class="map-wrapper" id="mapWrapper">
+    <img id="mapImage">
+    <svg class="overlay" id="overlay"></svg>
+  </div>
 </div>
 <div class="tooltip" id="tooltip">
   <div class="text"></div>
   <div class="conf"></div>
 </div>
 <div class="stats" id="stats"></div>
+<div class="loading-overlay" id="loadingOverlay">
+  <div class="spinner"></div>
+  <div id="loadingText">Processing map...</div>
+</div>
 
 <script>
 const DATA_DIR = 'data';
-const geojsonFiles = [
+const FALLBACK_MAPS = [
   'stanford--bb014tx0752',
   'stanford--bb051ch9980',
   'rumsey--RUMSEY_8_1_377486_90143668',
@@ -63,53 +89,185 @@ const geojsonFiles = [
 
 let currentData = null;
 let currentRecord = null;
+let zoomLevel = 1;
+let panX = 0;
+let panY = 0;
+let isPanning = false;
+let lastMouseX = 0;
+let lastMouseY = 0;
 
 const select = document.getElementById('mapSelect');
 const confSlider = document.getElementById('confSlider');
 const confValue = document.getElementById('confValue');
-const widthSlider = document.getElementById('widthSlider');
-const widthValue = document.getElementById('widthValue');
+const zoomValue = document.getElementById('zoomValue');
 const showBoxes = document.getElementById('showBoxes');
 const mapImage = document.getElementById('mapImage');
 const overlay = document.getElementById('overlay');
+const mapWrapper = document.getElementById('mapWrapper');
+const viewerElement = document.getElementById('viewer');
 const tooltip = document.getElementById('tooltip');
 const stats = document.getElementById('stats');
 
-geojsonFiles.forEach(f => {
-  const opt = document.createElement('option');
-  opt.value = f;
-  opt.textContent = f;
-  select.appendChild(opt);
-});
+// --- Dynamic map list ---
+
+async function loadMapList(selectSlug) {
+  let maps = null;
+  try {
+    const resp = await fetch('/api/maps');
+    if (resp.ok) maps = await resp.json();
+  } catch (e) {
+    // API not available — fall back to hardcoded list
+  }
+
+  select.innerHTML = '';
+
+  if (maps && maps.length > 0) {
+    maps.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.slug;
+      opt.textContent = `${m.title} (${m.source})`;
+      select.appendChild(opt);
+    });
+    const slug = selectSlug || maps[0].slug;
+    select.value = slug;
+    loadMap(slug);
+  } else {
+    // Fallback: load from hardcoded list (works with any static file server)
+    FALLBACK_MAPS.forEach(slug => {
+      const opt = document.createElement('option');
+      opt.value = slug;
+      opt.textContent = slug;
+      select.appendChild(opt);
+    });
+    loadMap(FALLBACK_MAPS[0]);
+  }
+}
 
 async function loadMap(slug) {
   const resp = await fetch(`${DATA_DIR}/geojson/${slug}.geojson`);
+  if (!resp.ok) {
+    stats.textContent = `Failed to load map: ${slug}`;
+    return;
+  }
   currentData = await resp.json();
   currentRecord = currentData.properties;
 
-  select.querySelectorAll('option').forEach(opt => {
-    if (opt.value === slug) opt.textContent = `${currentRecord.map_title} (${currentRecord.map_source})`;
-  });
+  // Update option text with real title if it was just a slug
+  const opt = select.querySelector(`option[value="${slug}"]`);
+  if (opt && opt.textContent === slug) {
+    opt.textContent = `${currentRecord.map_title} (${currentRecord.map_source})`;
+  }
 
-  // Load the downloaded image
   mapImage.src = `${DATA_DIR}/images/${currentRecord.map_source}/${slug}.jpg`;
-  mapImage.onload = () => renderOverlay();
+  mapImage.onload = () => {
+    const viewerRect = viewerElement.getBoundingClientRect();
+    zoomLevel = Math.min(
+      viewerRect.width / mapImage.naturalWidth,
+      viewerRect.height / mapImage.naturalHeight
+    ) * 0.95;
+    panX = (viewerRect.width - mapImage.naturalWidth * zoomLevel) / 2;
+    panY = (viewerRect.height - mapImage.naturalHeight * zoomLevel) / 2;
+    renderOverlay();
+  };
+}
+
+// --- Process IIIF manifest ---
+
+async function processManifest() {
+  const url = document.getElementById('manifestUrl').value.trim();
+  if (!url) return;
+
+  const btn = document.getElementById('processBtn');
+  const status = document.getElementById('processStatus');
+  const loadingOverlay = document.getElementById('loadingOverlay');
+  const loadingText = document.getElementById('loadingText');
+
+  btn.disabled = true;
+  status.textContent = 'Submitting...';
+  status.style.color = '#888';
+
+  try {
+    const resp = await fetch('/api/process', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({manifest_url: url}),
+    });
+    if (!resp.ok) {
+      const ct = resp.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        throw new Error('Processing API not available — start the server with: unimap serve');
+      }
+    }
+    const data = await resp.json();
+
+    if (data.error) throw new Error(data.error);
+
+    if (data.status === 'done') {
+      status.textContent = `Already processed — ${data.detections} detections`;
+      await loadMapList(data.slug);
+      btn.disabled = false;
+      return;
+    }
+
+    // Show loading overlay and poll
+    loadingOverlay.classList.add('active');
+    loadingText.textContent = 'Downloading image and running OCR... this may take a few minutes';
+
+    const result = await pollJob(data.job_id);
+    loadingOverlay.classList.remove('active');
+
+    if (result.status === 'done') {
+      status.textContent = `Done — ${result.detections} text detections found`;
+      status.style.color = '#00ff88';
+      await loadMapList(result.slug);
+    } else {
+      throw new Error(result.error || 'Processing failed');
+    }
+  } catch (e) {
+    document.getElementById('loadingOverlay').classList.remove('active');
+    status.textContent = `Error: ${e.message}`;
+    status.style.color = '#ff4444';
+  }
+
+  btn.disabled = false;
+}
+
+async function pollJob(jobId) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 3000));
+    const resp = await fetch(`/api/process/${jobId}`);
+    if (!resp.ok) throw new Error(`Server error (${resp.status})`);
+    const data = await resp.json();
+    if (data.status !== 'processing') return data;
+  }
+}
+
+document.getElementById('processBtn').addEventListener('click', processManifest);
+document.getElementById('manifestUrl').addEventListener('keydown', e => {
+  if (e.key === 'Enter') processManifest();
+});
+
+// --- Rendering ---
+
+function applyTransform() {
+  mapWrapper.style.transform = `translate(${panX}px, ${panY}px) scale(${zoomLevel})`;
+  zoomValue.textContent = Math.round(zoomLevel * 100);
 }
 
 function renderOverlay() {
   if (!currentData || !mapImage.naturalWidth) return;
 
-  const viewWidth = parseInt(widthSlider.value);
-  const scale = viewWidth / currentRecord.canvas_width;
-  const viewHeight = currentRecord.canvas_height * scale;
+  const imgW = mapImage.naturalWidth;
+  const imgH = mapImage.naturalHeight;
+  const scale = imgW / currentRecord.canvas_width;
 
-  mapImage.style.width = viewWidth + 'px';
-  mapImage.style.height = viewHeight + 'px';
+  mapImage.style.width = imgW + 'px';
+  mapImage.style.height = imgH + 'px';
 
-  overlay.setAttribute('width', viewWidth);
-  overlay.setAttribute('height', viewHeight);
-  overlay.style.width = viewWidth + 'px';
-  overlay.style.height = viewHeight + 'px';
+  overlay.setAttribute('width', imgW);
+  overlay.setAttribute('height', imgH);
+  overlay.style.width = imgW + 'px';
+  overlay.style.height = imgH + 'px';
 
   const minConf = parseInt(confSlider.value) / 100;
   const show = showBoxes.checked;
@@ -130,8 +288,7 @@ function renderOverlay() {
       const w = (Math.max(...xs) - Math.min(...xs)) * scale;
       const h = (Math.max(...ys) - Math.min(...ys)) * scale;
 
-      // Color by confidence: green = high, yellow = medium, red = low
-      const hue = Math.round(conf * 120); // 0=red, 120=green
+      const hue = Math.round(conf * 120);
       const color = `hsl(${hue}, 100%, 50%)`;
 
       const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
@@ -162,49 +319,66 @@ function renderOverlay() {
     });
   }
 
-  stats.textContent = `${shown} / ${currentData.features.length} detections shown (≥ ${minConf.toFixed(2)} confidence)`;
+  stats.textContent = `${shown} / ${currentData.features.length} detections shown (>= ${minConf.toFixed(2)} confidence)`;
+  applyTransform();
 }
+
+// --- Controls ---
 
 select.addEventListener('change', () => loadMap(select.value));
 confSlider.addEventListener('input', () => {
   confValue.textContent = (parseInt(confSlider.value) / 100).toFixed(2);
   renderOverlay();
 });
-widthSlider.addEventListener('input', () => {
-  widthValue.textContent = widthSlider.value;
-  renderOverlay();
-});
 showBoxes.addEventListener('change', renderOverlay);
 
-loadMap(geojsonFiles[0]);
+// --- Zoom toward cursor ---
 
-// Add zoom functionality using mouse wheel
-const viewerElement = document.getElementById('viewer');
-const ZOOM_SENSITIVITY = 0.001; // Controls how fast zoom is
+viewerElement.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const rect = viewerElement.getBoundingClientRect();
+  const mouseX = e.clientX - rect.left;
+  const mouseY = e.clientY - rect.top;
 
-viewerElement.addEventListener('wheel', (event) => {
-  event.preventDefault(); // Prevent default page scrolling
+  const factor = e.deltaY > 0 ? 0.9 : 1.1;
+  const newZoom = Math.max(0.05, Math.min(30, zoomLevel * factor));
+  const ratio = newZoom / zoomLevel;
 
-  const currentViewWidth = parseInt(widthSlider.value);
-  const zoomFactor = 1 - event.deltaY * ZOOM_SENSITIVITY; // Zoom in if deltaY is negative, zoom out if positive
-
-  // Calculate new viewWidth, clamping to min/max slider values
-  let newViewWidth = currentViewWidth * zoomFactor;
-  const minWidth = parseInt(widthSlider.min);
-  const maxWidth = parseInt(widthSlider.max);
-
-  // Ensure newViewWidth stays within bounds
-  if (newViewWidth < minWidth) {
-    newViewWidth = minWidth;
-  } else if (newViewWidth > maxWidth) {
-    newViewWidth = maxWidth;
-  }
-
-  // Update slider value and trigger renderOverlay
-  widthSlider.value = newViewWidth;
-  widthValue.textContent = newViewWidth;
-  renderOverlay();
+  panX = mouseX - (mouseX - panX) * ratio;
+  panY = mouseY - (mouseY - panY) * ratio;
+  zoomLevel = newZoom;
+  applyTransform();
 });
+
+// --- Pan with mouse drag ---
+
+viewerElement.addEventListener('mousedown', (e) => {
+  if (e.target.tagName === 'rect') return;
+  isPanning = true;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+  viewerElement.classList.add('panning');
+  e.preventDefault();
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (!isPanning) return;
+  panX += e.clientX - lastMouseX;
+  panY += e.clientY - lastMouseY;
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+  applyTransform();
+});
+
+window.addEventListener('mouseup', () => {
+  if (!isPanning) return;
+  isPanning = false;
+  viewerElement.classList.remove('panning');
+});
+
+// --- Init ---
+
+loadMapList();
 
 </script>
 </body>

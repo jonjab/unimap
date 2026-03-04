@@ -180,3 +180,16 @@ def run_all(ctx: click.Context, stanford: int, rumsey: int, max_width: int) -> N
     ctx.invoke(index)
 
     click.echo("\nPipeline complete! Use 'unimap search <query>' to search.")
+
+
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", default=8000, help="Port to bind to")
+@click.option("--debug", is_flag=True, help="Enable debug mode")
+def serve(host: str, port: int, debug: bool) -> None:
+    """Start the web viewer with IIIF manifest processing API."""
+    from unimap.server import create_app
+
+    app = create_app()
+    click.echo(f"Starting UniMap viewer at http://{host}:{port}")
+    app.run(host=host, port=port, debug=debug)

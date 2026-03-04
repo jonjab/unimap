@@ -14,10 +14,11 @@ logger = logging.getLogger(__name__)
 
 def _image_download_url(record: MapRecord, max_width: int = MAX_IMAGE_WIDTH) -> str:
     base = record.iiif_image_service_url.rstrip("/")
-    if record.source == "rumsey":
-        return f"{base}/full/!{max_width},{max_width}/0/default.jpg"
-    else:
+    if record.source == "stanford":
         return f"{base}/full/{max_width},/0/default.jpg"
+    else:
+        # Best-fit constraint works with most IIIF servers (Rumsey, custom, etc.)
+        return f"{base}/full/!{max_width},{max_width}/0/default.jpg"
 
 
 def download_image(record: MapRecord, max_width: int = MAX_IMAGE_WIDTH) -> Path:

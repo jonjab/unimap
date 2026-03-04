@@ -1,4 +1,4 @@
-.PHONY: install harvest download ocr index search run-all clean clean-all test lint
+.PHONY: install harvest download ocr index search run-all serve clean clean-all test lint
 
 UV := uv
 
@@ -23,6 +23,9 @@ search:
 
 run-all:
 	$(UV) run unimap run-all
+
+serve:
+	$(UV) run unimap serve
 
 clean:
 	rm -rf data/patches data/ocr_raw

@@ -7,6 +7,7 @@ import logging
 import httpx
 
 from unimap.config import STANFORD_IIIF_REF_KEY, STANFORD_LAYERS_URL, STANFORD_METADATA_BASE
+from unimap.harvest.iiif import parse_iiif_manifest as _parse_iiif_manifest
 from unimap.harvest.models import MapRecord
 
 logger = logging.getLogger(__name__)
@@ -48,52 +49,6 @@ def _is_map_with_iiif(record: dict) -> bool:
     else:
         refs = refs_raw
     return STANFORD_IIIF_REF_KEY in refs
-
-
-def _parse_iiif_manifest(client: httpx.Client, manifest_url: str) -> dict | None:
-    """Fetch and parse an IIIF manifest (v2 or v3) to extract canvas + image info."""
-    try:
-        resp = client.get(manifest_url, timeout=30)
-        resp.raise_for_status()
-        manifest = resp.json()
-    except (httpx.HTTPError, json.JSONDecodeError):
-        return None
-
-    # IIIF v3
-    if "items" in manifest:
-        try:
-            canvas = manifest["items"][0]
-            anno_page = canvas["items"][0]
-            anno = anno_page["items"][0]
-            body = anno["body"]
-            service = body.get("service", [{}])
-            if isinstance(service, list):
-                service = service[0]
-            return {
-                "canvas_id": canvas["id"],
-                "canvas_width": canvas["width"],
-                "canvas_height": canvas["height"],
-                "image_service_url": service.get("id") or service.get("@id", ""),
-            }
-        except (KeyError, IndexError):
-            return None
-
-    # IIIF v2
-    if "sequences" in manifest:
-        try:
-            canvas = manifest["sequences"][0]["canvases"][0]
-            image = canvas["images"][0]
-            service = image["resource"].get("service", {})
-            return {
-                "canvas_id": canvas["@id"],
-                "canvas_width": canvas["width"],
-                "canvas_height": canvas["height"],
-                "image_service_url": service.get("@id", ""),
-            }
-        except (KeyError, IndexError):
-            return None
-
-    return None
 
 
 def harvest(limit: int = 20) -> list[MapRecord]:

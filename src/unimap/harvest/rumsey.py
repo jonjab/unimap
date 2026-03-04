@@ -1,13 +1,13 @@
 """David Rumsey Map Collection harvester."""
 from __future__ import annotations
 
-import json
 import logging
 import time
 
 import httpx
 
 from unimap.config import RUMSEY_SEARCH_URL
+from unimap.harvest.iiif import parse_iiif_manifest as _parse_iiif_manifest
 from unimap.harvest.models import MapRecord
 
 logger = logging.getLogger(__name__)
@@ -27,27 +27,6 @@ def _search_luna(
     data = resp.json()
     return data.get("results", [])
 
-
-def _parse_iiif_manifest(client: httpx.Client, manifest_url: str) -> dict | None:
-    try:
-        resp = client.get(manifest_url, timeout=30)
-        resp.raise_for_status()
-        manifest = resp.json()
-    except (httpx.HTTPError, json.JSONDecodeError):
-        return None
-
-    try:
-        canvas = manifest["sequences"][0]["canvases"][0]
-        image = canvas["images"][0]
-        service = image["resource"].get("service", {})
-        return {
-            "canvas_id": canvas["@id"],
-            "canvas_width": canvas["width"],
-            "canvas_height": canvas["height"],
-            "image_service_url": service.get("@id", ""),
-        }
-    except (KeyError, IndexError):
-        return None
 
 
 def _extract_field(result: dict, field_name: str) -> str:
