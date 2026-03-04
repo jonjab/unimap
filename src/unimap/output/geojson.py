@@ -44,6 +44,7 @@ def ocr_result_to_geojson(record: MapRecord, result: MapOCRResult) -> dict:
             "map_source": record.source,
             "map_title": record.title,
             "total_detections": len(result.detections),
+            "metadata": record.metadata,
         },
         "features": features,
     }

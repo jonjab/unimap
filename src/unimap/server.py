@@ -73,11 +73,15 @@ def list_maps():
             props = data.get("properties", {})
             slug = gj_path.stem
             source = props.get("map_source", "unknown")
+            meta = props.get("metadata", {})
             maps.append({
                 "slug": slug,
                 "title": props.get("map_title", slug),
                 "source": source,
                 "total_detections": props.get("total_detections", 0),
+                "creator": meta.get("creator", ""),
+                "date": meta.get("date", ""),
+                "description": meta.get("description", ""),
             })
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Skipping %s: %s", gj_path, e)
